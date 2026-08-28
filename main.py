@@ -14,10 +14,12 @@ TEAM_ROLE_IDS = [
     1515268391915749466
 ]
 
-CAPTAIN_ROLE_ID = 1187722813386276885
+CAPTAIN_ROLE_ID = 1542864703057830049
 ROSTER_CAP = 21
 ROSTER_CHANNEL_ID = 1516697443453112400
 ROSTER_MESSAGE_ID = 1516699793907253301
+TRANSACTIONS_CHANNEL_ID = 1542864705721339946
+POSITIONS = ("GK", "CB", "FB", "CDM", "CM", "LM", "RM", "LW", "RW", "ST")
 
 def is_authorized(member):
     if member.guild_permissions.administrator:
@@ -30,9 +32,32 @@ class Client(discord.Client):
         intents.members = True
         super().__init__(intents=intents)
         self.tree = app_commands.CommandTree(self)
+        self.health_server = None
 
     async def setup_hook(self):
         await self.tree.sync()
+        self.health_server = await asyncio.start_server(
+            self.health_check,
+            host="0.0.0.0",
+            port=int(os.environ.get("PORT", "8000"))
+        )
+
+    async def health_check(self, reader, writer):
+        try:
+            await reader.read(1024)
+            response = (
+                b"HTTP/1.1 200 OK\r\n"
+                b"Content-Type: text/plain\r\n"
+                b"Content-Length: 2\r\n"
+                b"Connection: close\r\n"
+                b"\r\n"
+                b"OK"
+            )
+            writer.write(response)
+            await writer.drain()
+        finally:
+            writer.close()
+            await writer.wait_closed()
 
     async def on_ready(self):
         print(f"Logged in as {self.user}")
@@ -41,11 +66,155 @@ class Client(discord.Client):
 
 client = Client()
 
+draft_assignments = {}
+draft_view = None
+draft_panel_message = None
+draft_result_message = None
+
+def draft_panel_content(assignments):
+    lines = [
+        "⚽ **LIVE DRAFT**",
+        "Click one position below to select it. Clicking a different position moves you.",
+        "Your name and position will appear in `/draftresult`.",
+        "",
+        f"**Players currently selected:** {len(assignments)}"
+    ]
+    return "\n".join(lines)
+
+def draft_result_content(assignments):
+    lines = [
+        "⚽ **DRAFT RESULTS**",
+        ""
+    ]
+    for position in POSITIONS:
+        players = sorted(
+            [
+                discord.utils.escape_markdown(player_name)
+                for player_name, selected_position in assignments.values()
+                if selected_position == position
+            ],
+            key=str.casefold
+        )
+        if players:
+            lines.extend([f"• {player_name} — **{position}**" for player_name in players])
+
+    if not assignments:
+        lines.append("**No players have selected a position yet.**")
+
+    return "\n".join(lines)
+
+async def update_draft_result_message():
+    global draft_result_message
+    if not draft_result_message:
+        return
+    try:
+        await draft_result_message.edit(content=draft_result_content(draft_assignments))
+    except discord.NotFound:
+        draft_result_message = None
+
+class DraftView(discord.ui.View):
+    def __init__(self):
+        super().__init__(timeout=None)
+        self.assignments = draft_assignments
+        self.closed = False
+
+    async def choose_position(self, interaction, position):
+        if self.closed:
+            return await interaction.response.send_message(
+                "This draft is closed.", ephemeral=True
+            )
+
+        self.assignments[interaction.user.id] = (
+            interaction.user.display_name,
+            position
+        )
+        await interaction.response.edit_message(
+            content=draft_panel_content(self.assignments),
+            view=self
+        )
+        await update_draft_result_message()
+
+    async def remove_selection(self, interaction):
+        if self.closed:
+            return await interaction.response.send_message(
+                "This draft is closed.", ephemeral=True
+            )
+
+        self.assignments.pop(interaction.user.id, None)
+        await interaction.response.edit_message(
+            content=draft_panel_content(self.assignments),
+            view=self
+        )
+        await update_draft_result_message()
+
+    @discord.ui.button(label="GK", style=discord.ButtonStyle.primary, row=0)
+    async def gk(self, interaction, button):
+        await self.choose_position(interaction, "GK")
+
+    @discord.ui.button(label="CB", style=discord.ButtonStyle.primary, row=0)
+    async def cb(self, interaction, button):
+        await self.choose_position(interaction, "CB")
+
+    @discord.ui.button(label="FB", style=discord.ButtonStyle.primary, row=0)
+    async def fb(self, interaction, button):
+        await self.choose_position(interaction, "FB")
+
+    @discord.ui.button(label="CDM", style=discord.ButtonStyle.primary, row=0)
+    async def cdm(self, interaction, button):
+        await self.choose_position(interaction, "CDM")
+
+    @discord.ui.button(label="CM", style=discord.ButtonStyle.primary, row=0)
+    async def cm(self, interaction, button):
+        await self.choose_position(interaction, "CM")
+
+    @discord.ui.button(label="LM", style=discord.ButtonStyle.primary, row=1)
+    async def lm(self, interaction, button):
+        await self.choose_position(interaction, "LM")
+
+    @discord.ui.button(label="RM", style=discord.ButtonStyle.primary, row=1)
+    async def rm(self, interaction, button):
+        await self.choose_position(interaction, "RM")
+
+    @discord.ui.button(label="LW", style=discord.ButtonStyle.primary, row=1)
+    async def lw(self, interaction, button):
+        await self.choose_position(interaction, "LW")
+
+    @discord.ui.button(label="RW", style=discord.ButtonStyle.primary, row=1)
+    async def rw(self, interaction, button):
+        await self.choose_position(interaction, "RW")
+
+    @discord.ui.button(label="ST", style=discord.ButtonStyle.primary, row=2)
+    async def st(self, interaction, button):
+        await self.choose_position(interaction, "ST")
+
+    @discord.ui.button(label="Remove selection", style=discord.ButtonStyle.secondary, row=2)
+    async def remove(self, interaction, button):
+        await self.remove_selection(interaction)
+
+    @discord.ui.button(label="Close draft", style=discord.ButtonStyle.danger, row=2)
+    async def close(self, interaction, button):
+        if not interaction.user.guild_permissions.administrator:
+            return await interaction.response.send_message(
+                "Only admins can close a draft.", ephemeral=True
+            )
+
+        self.closed = True
+        for item in self.children:
+            item.disabled = True
+
+        await interaction.response.edit_message(
+            content=draft_panel_content(self.assignments) + "\n\n🔒 **DRAFT CLOSED**",
+            view=self
+        )
+
 def get_team_role(member):
     for role in member.roles:
         if role.id in TEAM_ROLE_IDS:
             return role
     return None
+
+def get_transactions_channel(guild):
+    return guild.get_channel(TRANSACTIONS_CHANNEL_ID)
 
 def is_captain_of(member, team_role):
     return (
@@ -289,17 +458,106 @@ async def sign(interaction: discord.Interaction, player: discord.Member):
             ephemeral=True
         )
 
-    await interaction.response.defer()
+    await interaction.response.defer(ephemeral=True)
 
     view = ConfirmSign(player, signer_team, interaction.user)
+    channel = get_transactions_channel(interaction.guild)
+    if not channel:
+        return await interaction.followup.send(
+            "I could not find the configured transactions channel.", ephemeral=True
+        )
 
-    await interaction.followup.send(
+    await channel.send(
         f"📋 **SIGNING PENDING**\n\n"
         f"{player.mention} → **{signer_team.name}**\n\n"
         f"Requested by {interaction.user.mention}\n\n"
         f"⏳ Waiting for {player.mention} to accept.",
         view=view
     )
+    await interaction.followup.send(
+        f"Signing request posted in <#{TRANSACTIONS_CHANNEL_ID}>.",
+        ephemeral=True
+    )
+
+@client.tree.command(name="draft", description="Start a live position draft board")
+async def draft(interaction: discord.Interaction):
+    global draft_view, draft_panel_message
+
+    if not is_authorized(interaction.user):
+        return await interaction.response.send_message(
+            "Only captains and admins can start a draft.", ephemeral=True
+        )
+
+    if draft_view and draft_panel_message and not draft_view.closed:
+        try:
+            await draft_panel_message.edit(
+                content=draft_panel_content(draft_assignments),
+                view=draft_view
+            )
+            return await interaction.response.send_message(
+                "The live draft panel is already active.", ephemeral=True
+            )
+        except discord.NotFound:
+            draft_panel_message = None
+
+    view = DraftView()
+    await interaction.response.send_message(
+        content=draft_panel_content(view.assignments),
+        view=view
+    )
+    draft_view = view
+    draft_panel_message = await interaction.original_response()
+
+@client.tree.command(name="draftresult", description="Show or update the draft result message")
+async def draftresult(interaction: discord.Interaction):
+    global draft_result_message
+
+    if not is_authorized(interaction.user):
+        return await interaction.response.send_message(
+            "Only captains and admins can show draft results.", ephemeral=True
+        )
+
+    content = draft_result_content(draft_assignments)
+    if draft_result_message:
+        try:
+            await draft_result_message.edit(content=content)
+            return await interaction.response.send_message(
+                "The draft result message was updated.", ephemeral=True
+            )
+        except discord.NotFound:
+            draft_result_message = None
+
+    await interaction.response.send_message(content=content)
+    draft_result_message = await interaction.original_response()
+
+@client.tree.command(name="draftreset", description="Reset all draft position selections")
+async def draftreset(interaction: discord.Interaction):
+    global draft_panel_message, draft_view
+
+    if not interaction.user.guild_permissions.administrator:
+        return await interaction.response.send_message(
+            "Only admins can reset the draft.", ephemeral=True
+        )
+
+    await interaction.response.defer(ephemeral=True)
+    draft_assignments.clear()
+
+    if draft_view:
+        draft_view.closed = False
+        for item in draft_view.children:
+            item.disabled = False
+
+    if draft_panel_message:
+        try:
+            await draft_panel_message.edit(
+                content=draft_panel_content(draft_assignments),
+                view=draft_view
+            )
+        except discord.NotFound:
+            draft_panel_message = None
+
+    await update_draft_result_message()
+    await interaction.followup.send("The draft has been reset.", ephemeral=True)
 
 @client.tree.command(name="release", description="Release a player from your team")
 @app_commands.describe(player="The player to release")
@@ -315,13 +573,24 @@ async def release(interaction: discord.Interaction, player: discord.Member):
     if not interaction.user.guild_permissions.administrator and (not signer_team or signer_team.id != player_team.id):
         return await interaction.response.send_message("You can only release players from your own team.", ephemeral=True)
 
-    await interaction.response.defer()
+    await interaction.response.defer(ephemeral=True)
     await player.remove_roles(player_team)
 
-    await interaction.followup.send(
+    channel = get_transactions_channel(interaction.guild)
+    if not channel:
+        return await interaction.followup.send(
+            "The player was released, but I could not find the configured transactions channel.",
+            ephemeral=True
+        )
+
+    await channel.send(
         f"📤 **PLAYER RELEASED**\n\n"
         f"{player.mention} has been released from **{player_team.name}**.\n\n"
         f"Released by {interaction.user.mention}"
+    )
+    await interaction.followup.send(
+        f"Release posted in <#{TRANSACTIONS_CHANNEL_ID}>.",
+        ephemeral=True
     )
     await update_roster_message(interaction.guild)
 
@@ -393,7 +662,7 @@ async def trade(
     if not is_authorized(interaction.user):
         return await interaction.response.send_message("Only captains and admins can use this command.", ephemeral=True)
 
-    await interaction.response.defer()
+    await interaction.response.defer(ephemeral=True)
 
     team_a_players = [p for p in [team_a_player_1, team_a_player_2, team_a_player_3, team_a_player_4, team_a_player_5] if p]
     team_b_players = [p for p in [team_b_player_1, team_b_player_2, team_b_player_3, team_b_player_4, team_b_player_5] if p]
@@ -429,10 +698,19 @@ async def trade(
         )
 
     view = TradeView(team_a_players, team_b_players, team_a_role, team_b_role)
+    channel = get_transactions_channel(interaction.guild)
+    if not channel:
+        return await interaction.followup.send(
+            "I could not find the configured transactions channel.", ephemeral=True
+        )
 
-    await interaction.followup.send(
+    await channel.send(
         content=trade_message(team_a_players, team_b_players, team_a_role, team_b_role, False, False),
         view=view
+    )
+    await interaction.followup.send(
+        f"Trade request posted in <#{TRANSACTIONS_CHANNEL_ID}>.",
+        ephemeral=True
     )
 
 client.run(TOKEN, reconnect=True)
