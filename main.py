@@ -71,6 +71,18 @@ draft_view = None
 draft_panel_message = None
 draft_result_message = None
 
+@client.tree.error
+async def on_app_command_error(interaction, error):
+    print(f"Application command error: {error}")
+    message = "Something went wrong while running that command. Please try again."
+    if isinstance(error, app_commands.MissingPermissions):
+        message = "You do not have permission to use that command."
+
+    if interaction.response.is_done():
+        await interaction.followup.send(message, ephemeral=True)
+    else:
+        await interaction.response.send_message(message, ephemeral=True)
+
 def draft_panel_content(assignments):
     lines = [
         "⚽ **LIVE DRAFT**",
@@ -501,12 +513,13 @@ async def draft(interaction: discord.Interaction):
             draft_panel_message = None
 
     view = DraftView()
-    await interaction.response.send_message(
+    await interaction.response.defer()
+    draft_panel_message = await interaction.followup.send(
         content=draft_panel_content(view.assignments),
-        view=view
+        view=view,
+        wait=True
     )
     draft_view = view
-    draft_panel_message = await interaction.original_response()
 
 @client.tree.command(name="draftresult", description="Show or update the draft result message")
 async def draftresult(interaction: discord.Interaction):
@@ -527,8 +540,8 @@ async def draftresult(interaction: discord.Interaction):
         except discord.NotFound:
             draft_result_message = None
 
-    await interaction.response.send_message(content=content)
-    draft_result_message = await interaction.original_response()
+    await interaction.response.defer()
+    draft_result_message = await interaction.followup.send(content=content, wait=True)
 
 @client.tree.command(name="draftreset", description="Reset all draft position selections")
 async def draftreset(interaction: discord.Interaction):
