@@ -5,7 +5,11 @@ from datetime import datetime, timezone
 import discord
 from discord import app_commands
 
-TOKEN = os.environ.get("DISCORD_TOKEN")
+TOKEN = os.environ.get("DISCORD_TOKEN", "").strip()
+if TOKEN.startswith("Bot "):
+    TOKEN = TOKEN[4:].strip()
+if len(TOKEN) >= 2 and TOKEN[0] == TOKEN[-1] and TOKEN[0] in {"'", '"'}:
+    TOKEN = TOKEN[1:-1].strip()
 if not TOKEN:
     raise RuntimeError("DISCORD_TOKEN environment variable is not set. Add it in Railway → Variables.")
 
