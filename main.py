@@ -27,9 +27,9 @@ TRANSACTIONS_CHANNEL_ID = 1542864705721339946
 POSITIONS = ("GK", "CB", "FB", "CDM", "CM", "LM", "RM", "LW", "RW", "ST")
 MONEY_FILE = os.environ.get("MONEY_FILE", "money_data.json")
 CARD_PRICES = {
-    "shield": ("🛡️", "Shield", 175000),
-    "joker": ("🃏", "Joker", 225000),
-    "heart": ("❤️", "Heart", 350000),
+    "shield": ("🛡️", "Protection Card", 175000),
+    "joker": ("🃏", "Joker Card", 225000),
+    "wildcard": ("🔥", "Wildcard", 350000),
 }
 
 def load_money_data():
@@ -497,9 +497,9 @@ async def moneyremove(
 @client.tree.command(name="buycard", description="Buy a card using your balance")
 @app_commands.describe(card="The card you want to buy")
 @app_commands.choices(card=[
-    app_commands.Choice(name="🛡️ Shield — 175K", value="shield"),
-    app_commands.Choice(name="🃏 Joker — 225K", value="joker"),
-    app_commands.Choice(name="❤️ Heart — 350K", value="heart"),
+    app_commands.Choice(name="🛡️ Protection Card — 175K", value="shield"),
+    app_commands.Choice(name="🃏 Joker Card — 225K", value="joker"),
+    app_commands.Choice(name="🔥 Wildcard — 350K", value="wildcard"),
 ])
 async def buycard(interaction: discord.Interaction, card: app_commands.Choice[str]):
     emoji, card_name, price = CARD_PRICES[card.value]
@@ -544,9 +544,9 @@ async def moneyrules(interaction: discord.Interaction):
         "• LB player: 30K–150K\n"
         "• Normal free agent: 29K or below\n\n"
         "**Card prices:**\n"
-        "• 🛡️ Shield: 175K\n"
-        "• 🃏 Joker: 225K\n"
-        "• ❤️ Heart: 350K"
+        "• 🛡️ Protection Card: 175K\n"
+        "• 🃏 Joker Card: 225K\n"
+        "• 🔥 Wildcard: 350K"
     )
 
 def is_captain_of(member, team_role):
