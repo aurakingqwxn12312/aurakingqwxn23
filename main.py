@@ -1,5 +1,7 @@
 import os
 import asyncio
+import json
+from datetime import datetime, timezone
 import discord
 from discord import app_commands
 
@@ -8,18 +10,120 @@ if not TOKEN:
     raise RuntimeError("DISCORD_TOKEN environment variable is not set. Add it in Railway → Variables.")
 
 TEAM_ROLE_IDS = [
-    1515268091133563031,
-    1515268090105958400,
-    1515268091955646464,
-    1515268391915749466
+    1545598912696688641,
+    1545598938407633038,
+    1545598955499560960
 ]
 
 CAPTAIN_ROLE_ID = 1542864703057830049
-ROSTER_CAP = 21
+ROSTER_CAP = 24
 ROSTER_CHANNEL_ID = 1516697443453112400
 ROSTER_MESSAGE_ID = 1516699793907253301
 TRANSACTIONS_CHANNEL_ID = 1542864705721339946
 POSITIONS = ("GK", "CB", "FB", "CDM", "CM", "LM", "RM", "LW", "RW", "ST")
+MONEY_FILE = os.environ.get("MONEY_FILE", "money_data.json")
+CARD_PRICES = {
+    "shield": ("🛡️", "Shield", 175000),
+    "joker": ("🃏", "Joker", 225000),
+    "heart": ("❤️", "Heart", 350000),
+}
+
+def load_money_data():
+    if not os.path.exists(MONEY_FILE):
+        return {"balances": {}, "members": {}, "transactions": []}
+
+    try:
+        with open(MONEY_FILE, "r", encoding="utf-8") as file:
+            data = json.load(file)
+    except json.JSONDecodeError as error:
+        raise RuntimeError(f"{MONEY_FILE} is not valid JSON: {error}") from error
+
+    if not isinstance(data, dict):
+        raise RuntimeError(f"{MONEY_FILE} must contain a JSON object.")
+
+    data.setdefault("balances", {})
+    data.setdefault("members", {})
+    data.setdefault("transactions", [])
+    return data
+
+money_data = load_money_data()
+
+def save_money_data():
+    temporary_file = f"{MONEY_FILE}.tmp"
+    with open(temporary_file, "w", encoding="utf-8") as file:
+        json.dump(money_data, file, indent=2)
+    os.replace(temporary_file, MONEY_FILE)
+
+def money_display(amount):
+    if amount % 1000 == 0:
+        return f"{amount // 1000}K"
+    return f"{amount:,}"
+
+def member_display_name(member):
+    return discord.utils.escape_markdown(member.display_name)
+
+def balance_for(member):
+    return int(money_data["balances"].get(str(member.id), 0))
+
+def remember_member(member):
+    money_data["members"][str(member.id)] = member.display_name
+
+def record_money_change(member, amount, reason, transaction_type, source=None):
+    current_balance = balance_for(member)
+    new_balance = current_balance + amount
+    if new_balance < 0:
+        raise ValueError(
+            f"{member.display_name} only has {money_display(current_balance)}."
+        )
+
+    member_id = str(member.id)
+    remember_member(member)
+    money_data["balances"][member_id] = new_balance
+    money_data["transactions"].append({
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "type": transaction_type,
+        "amount": amount,
+        "player_id": member_id,
+        "source": source,
+        "reason": reason,
+        "balance_after": new_balance,
+    })
+    save_money_data()
+    return new_balance
+
+def transfer_money(sender, receiver, amount, reason):
+    sender_balance = balance_for(sender)
+    if sender_balance < amount:
+        raise ValueError(
+            f"{sender.display_name} only has {money_display(sender_balance)}."
+        )
+
+    remember_member(sender)
+    remember_member(receiver)
+    sender_id = str(sender.id)
+    receiver_id = str(receiver.id)
+    money_data["balances"][sender_id] = sender_balance - amount
+    money_data["balances"][receiver_id] = balance_for(receiver) + amount
+    timestamp = datetime.now(timezone.utc).isoformat()
+    money_data["transactions"].append({
+        "timestamp": timestamp,
+        "type": "transfer",
+        "amount": amount,
+        "from_id": sender_id,
+        "to_id": receiver_id,
+        "reason": reason,
+        "sender_balance_after": money_data["balances"][sender_id],
+        "receiver_balance_after": money_data["balances"][receiver_id],
+    })
+    save_money_data()
+    return money_data["balances"][sender_id], money_data["balances"][receiver_id]
+
+async def post_money_transaction(guild, content):
+    channel = get_transactions_channel(guild)
+    if channel:
+        await channel.send(content)
+        return True
+    return False
 
 def is_authorized(member):
     if member.guild_permissions.administrator:
@@ -227,6 +331,219 @@ def get_team_role(member):
 
 def get_transactions_channel(guild):
     return guild.get_channel(TRANSACTIONS_CHANNEL_ID)
+
+def is_admin(member):
+    return member.guild_permissions.administrator
+
+@client.tree.command(name="balance", description="Check a player's money balance")
+@app_commands.describe(player="The player whose balance you want to check")
+async def balance(interaction: discord.Interaction, player: discord.Member = None):
+    target = player or interaction.user
+    remember_member(target)
+    save_money_data()
+    await interaction.response.send_message(
+        f"💰 **{member_display_name(target)}** has **{money_display(balance_for(target))}**.",
+        ephemeral=True
+    )
+
+@client.tree.command(name="moneyboard", description="Show the richest players")
+async def moneyboard(interaction: discord.Interaction):
+    entries = sorted(
+        [
+            (name, int(money_data["balances"].get(member_id, 0)))
+            for member_id, name in money_data["members"].items()
+            if int(money_data["balances"].get(member_id, 0)) > 0
+        ],
+        key=lambda entry: (-entry[1], entry[0].casefold())
+    )
+
+    if not entries:
+        return await interaction.response.send_message(
+            "💰 No player balances have been created yet."
+        )
+
+    lines = ["💰 **MONEY LEADERBOARD**", ""]
+    for index, (name, amount) in enumerate(entries[:25], start=1):
+        lines.append(f"**{index}.** {discord.utils.escape_markdown(name)} — **{money_display(amount)}**")
+
+    await interaction.response.send_message("\n".join(lines))
+
+@client.tree.command(name="pay", description="Pay another player from your balance")
+@app_commands.describe(
+    player="The player to pay",
+    amount="The amount to pay",
+    reason="Why you are paying them"
+)
+async def pay(
+    interaction: discord.Interaction,
+    player: discord.Member,
+    amount: app_commands.Range[int, 1, 1000000000],
+    reason: str
+):
+    if player.id == interaction.user.id:
+        return await interaction.response.send_message(
+            "You cannot pay yourself.", ephemeral=True
+        )
+    if player.bot:
+        return await interaction.response.send_message(
+            "You cannot pay a bot.", ephemeral=True
+        )
+
+    await interaction.response.defer(ephemeral=True)
+    try:
+        sender_balance, receiver_balance = transfer_money(
+            interaction.user, player, amount, reason
+        )
+    except ValueError as error:
+        return await interaction.followup.send(str(error), ephemeral=True)
+
+    await post_money_transaction(
+        interaction.guild,
+        f"💸 **PLAYER PAYMENT**\n"
+        f"{member_display_name(interaction.user)} paid {member_display_name(player)} "
+        f"**{money_display(amount)}**.\n"
+        f"Reason: {reason}"
+    )
+    await interaction.followup.send(
+        f"Payment sent. Your new balance is **{money_display(sender_balance)}**. "
+        f"{member_display_name(player)} now has **{money_display(receiver_balance)}**.",
+        ephemeral=True
+    )
+
+@client.tree.command(name="moneyadd", description="Add money to a player's balance")
+@app_commands.describe(
+    player="The player receiving money",
+    amount="The amount to add",
+    reason="For example: league win, scrim win, trade, or free-agent payment"
+)
+async def moneyadd(
+    interaction: discord.Interaction,
+    player: discord.Member,
+    amount: app_commands.Range[int, 1, 1000000000],
+    reason: str
+):
+    if not is_admin(interaction.user):
+        return await interaction.response.send_message(
+            "Only admins can add money.", ephemeral=True
+        )
+
+    await interaction.response.defer(ephemeral=True)
+    new_balance = record_money_change(
+        player,
+        amount,
+        reason,
+        "credit",
+        source=str(interaction.user.id)
+    )
+    await post_money_transaction(
+        interaction.guild,
+        f"📈 **MONEY ADDED**\n"
+        f"{member_display_name(player)} received **{money_display(amount)}**.\n"
+        f"Reason: {reason}\n"
+        f"New balance: **{money_display(new_balance)}**"
+    )
+    await interaction.followup.send(
+        f"Added **{money_display(amount)}** to {member_display_name(player)}. "
+        f"New balance: **{money_display(new_balance)}**.",
+        ephemeral=True
+    )
+
+@client.tree.command(name="moneyremove", description="Remove money from a player's balance")
+@app_commands.describe(
+    player="The player being charged",
+    amount="The amount to remove",
+    reason="For example: league entry fee, lost bet, trade, or free-agent fee"
+)
+async def moneyremove(
+    interaction: discord.Interaction,
+    player: discord.Member,
+    amount: app_commands.Range[int, 1, 1000000000],
+    reason: str
+):
+    if not is_admin(interaction.user):
+        return await interaction.response.send_message(
+            "Only admins can remove money.", ephemeral=True
+        )
+
+    await interaction.response.defer(ephemeral=True)
+    try:
+        new_balance = record_money_change(
+            player,
+            -amount,
+            reason,
+            "debit",
+            source=str(interaction.user.id)
+        )
+    except ValueError as error:
+        return await interaction.followup.send(str(error), ephemeral=True)
+
+    await post_money_transaction(
+        interaction.guild,
+        f"📉 **MONEY REMOVED**\n"
+        f"{member_display_name(player)} paid **{money_display(amount)}**.\n"
+        f"Reason: {reason}\n"
+        f"New balance: **{money_display(new_balance)}**"
+    )
+    await interaction.followup.send(
+        f"Removed **{money_display(amount)}** from {member_display_name(player)}. "
+        f"New balance: **{money_display(new_balance)}**.",
+        ephemeral=True
+    )
+
+@client.tree.command(name="buycard", description="Buy a card using your balance")
+@app_commands.describe(card="The card you want to buy")
+@app_commands.choices(card=[
+    app_commands.Choice(name="🛡️ Shield — 175K", value="shield"),
+    app_commands.Choice(name="🃏 Joker — 225K", value="joker"),
+    app_commands.Choice(name="❤️ Heart — 350K", value="heart"),
+])
+async def buycard(interaction: discord.Interaction, card: app_commands.Choice[str]):
+    emoji, card_name, price = CARD_PRICES[card.value]
+    await interaction.response.defer(ephemeral=True)
+    try:
+        new_balance = record_money_change(
+            interaction.user,
+            -price,
+            f"Bought {card_name} card",
+            "card_purchase"
+        )
+    except ValueError as error:
+        return await interaction.followup.send(str(error), ephemeral=True)
+
+    await post_money_transaction(
+        interaction.guild,
+        f"{emoji} **CARD PURCHASE**\n"
+        f"{member_display_name(interaction.user)} bought a **{card_name}** card "
+        f"for **{money_display(price)}**.\n"
+        f"New balance: **{money_display(new_balance)}**"
+    )
+    await interaction.followup.send(
+        f"You bought the {emoji} **{card_name}** card for **{money_display(price)}**. "
+        f"Your new balance is **{money_display(new_balance)}**.",
+        ephemeral=True
+    )
+
+@client.tree.command(name="moneyrules", description="Show the current league money rules")
+async def moneyrules(interaction: discord.Interaction):
+    await interaction.response.send_message(
+        "💰 **LEAGUE MONEY RULES**\n\n"
+        "**Ways to earn:**\n"
+        "• Trading players\n"
+        "• Winning a league game: 40K–80K, or 120K for mercy\n"
+        "• Winning a scrim bet\n"
+        "• Winning a captain's league bet\n\n"
+        "**Ways to lose:**\n"
+        "• Trading players\n"
+        "• Losing a scrim bet\n"
+        "• League game entry fee: 10K\n\n"
+        "**Free-agent fees:**\n"
+        "• LB player: 30K–150K\n"
+        "• Normal free agent: 29K or below\n\n"
+        "**Card prices:**\n"
+        "• 🛡️ Shield: 175K\n"
+        "• 🃏 Joker: 225K\n"
+        "• ❤️ Heart: 350K"
+    )
 
 def is_captain_of(member, team_role):
     return (
